@@ -1,0 +1,12 @@
+[package]
+name = "iris"
+version = "0.5.0"
+authors = ["Matthieu Buffet <matthieu@buffet.re>"]
+edition = "2018"
+
+[dependencies]
+iris-policy = { path = "../libiris-policy" }
+iris-ipc = { path = "../libiris-ipc" }
+libc = "0.2.94"
+winapi = { version = "0.3.9", features = ["processthreadsapi", "errhandlingapi", "sysinfoapi", "winbase", "winerror", "userenv", "sddl", "synchapi"] }
+
