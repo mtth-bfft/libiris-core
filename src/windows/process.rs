@@ -4,6 +4,7 @@ use std::ffi::{CStr, CString};
 use std::convert::TryInto;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use winapi::um::processthreadsapi::{CreateProcessA, PROCESS_INFORMATION, GetProcessId, GetExitCodeProcess, TerminateProcess};
+use winapi::um::userenv::CreateAppContainerProfile;
 use winapi::um::synchapi::WaitForSingleObject;
 use winapi::shared::winerror::ERROR_WAIT_NO_CHILDREN;
 use winapi::um::handleapi::CloseHandle;
@@ -36,6 +37,39 @@ const PROCESS_CREATION_MITIGATION_POLICY_HIGH_ENTROPY_ASLR_ALWAYS_ON: DWORD = 0x
 const PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON: DWORD = 0x10000000;
 
 const MAX_USED_PROC_THREAD_ATTRIBUTES: DWORD = 5; // child process creation policy, mitigation policy, AppContainer, LPAC
+
+const PROCESS_SANITIZED_ENVIRONMENT: &[(&str, Option<&str>)] = &[
+    // Avoid leaking the username/hostname whenever possible
+    ("COMPUTERNAME", Some("PC")),
+    ("LOGONSERVER", Some("\\\\PC")),
+    ("USERDOMAIN", Some("PC")),
+    ("USERDOMAIN_ROAMINGPROFILE", Some("PC")),
+    ("USERNAME", Some("User")),
+    // Generic paths/system information are often required and don't leak user data
+    ("COMMONPROGRAMFILES", None),
+    ("COMMONPROGRAMFILES(X86)", None),
+    ("COMMONPROGRAMW6432", None),
+    ("COMSPEC", None),
+    ("DRIVERDATA", None),
+    ("HOMEDRIVE", None),
+    ("OS", None),
+    ("PATHEXT", None),
+    ("PROGRAMDATA", None),
+    ("PROGRAMFILES", None),
+    ("PROGRAMFILES(X86)", None),
+    ("PROGRAMW6432", None),
+    ("PUBLIC", None),
+    ("SESSIONNAME", None),
+    ("SYSTEMDRIVE", None),
+    ("SYSTEMROOT", None),
+    ("WINDIR", None),
+    ("NUMBER_OF_PROCESSORS", None),
+    ("PROCESSOR_ARCHITECTURE", None),
+    ("PROCESSOR_IDENTIFIER", None),
+    ("PROCESSOR_LEVEL", None),
+    ("PROCESSOR_REVISION", None),
+    ("LOCALAPPDATA", None), // TODO: required for AppContainer start. Find out if we can do better (leaks username).
+];
 
 static mut PER_PROCESS_APPCONTAINER_ID: std::sync::atomic::AtomicUsize = AtomicUsize::new(0);
 
@@ -71,7 +105,28 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
         let cmdline = CString::new(cmdline).unwrap();
 
         // Build the concatenated environment block (NULL-terminated strings, the last one with a double-NULL terminator)
-        let envblock: Vec<u8> = envp.iter().flat_map(|s| s.to_bytes_with_nul()).chain(std::iter::once(&0)).cloned().collect();
+        // Merge the caller-provided values with sanitized system environment variables
+        let mut merged_envp: Vec<CString> = envp.iter().map(|s| CString::new(s.to_bytes()).unwrap()).collect();
+        for (var_name, forced_val) in PROCESS_SANITIZED_ENVIRONMENT {
+            let var_name_c = CString::new(*var_name).unwrap().into_bytes();
+            let mut explicitly_set = false;
+            for entry in &merged_envp {
+                let entry = entry.to_bytes();
+                if entry.get(..var_name_c.len()) == Some(&var_name_c[..]) && entry.get(var_name_c.len()) == Some(&b'=') {
+                    explicitly_set = true;
+                    break;
+                }
+            }
+            if !explicitly_set {
+                if let Some(forced_val) = forced_val {
+                    merged_envp.push(CString::new(format!("{}={}", var_name, forced_val)).unwrap());
+                }
+                else if let Ok(system_val) = std::env::var(var_name) {
+                    merged_envp.push(CString::new(format!("{}={}", var_name, system_val)).unwrap());
+                }
+            }
+        }
+        let envblock: Vec<u8> = merged_envp.iter().flat_map(|s| s.to_bytes_with_nul()).chain(std::iter::once(&0)).cloned().collect();
 
         // Build the starting directory as C:\Windows so that it doesn't keep a handle on any other directory
         let mut cwd = vec![0u8; MAX_PATH + 1];
@@ -133,9 +188,14 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
         }*/
         let appcontainer_id = unsafe { PER_PROCESS_APPCONTAINER_ID.fetch_add(1, Ordering::Relaxed) };
         let appcontainer_name = format!("IrisAppContainer_{}_{}", std::process::id(), appcontainer_id);
+        let name_buf: Vec<u16> = appcontainer_name.encode_utf16().chain(std::iter::once(0)).collect();
+        let res = unsafe { CreateAppContainerProfile(name_buf.as_ptr() as *const _, name_buf.as_ptr() as *const _, name_buf.as_ptr() as *const _, null_mut(), 0, &mut capabilities.AppContainerSid as *mut _) };
+        if res != 0 {
+            return Err(format!("CreateAppContainerProfile({}) failed with error {}", appcontainer_name, unsafe { GetLastError() }));
+        }
         let appcontainer_sid = Sid::from_appcontainer_name(&appcontainer_name)?;
         capabilities.AppContainerSid = appcontainer_sid.as_ptr();
-        //ptal.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities as *const _ as *const _, std::mem::size_of_val(&capabilities))?;
+        ptal.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities as *const _ as *const _, std::mem::size_of_val(&capabilities))?;
 
         // Start as a Less Privileged AppContainer whenever possible
         let lpac_policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
