@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 use crate::Policy;
 use crate::process::CrossPlatformSandboxedProcess;
 use crate::os::process::OSSandboxedProcess;
-use crate::os::handle::allow_handle_inheritance;
+use crate::os::handle::set_handle_inheritance;
 use iris_ipc::{MessagePipe, CrossPlatformMessagePipe};
 
 // Name of the environment variable used to pass the IPC socket handle/file
@@ -19,8 +19,14 @@ impl Worker {
         let (mut broker_pipe, worker_pipe) = MessagePipe::new()?;
         let mut policy = policy.clone();
         for handle in worker_pipe.as_handles() {
-            allow_handle_inheritance(handle)?;
             policy.allow_inherit_resource(handle)?;
+        }
+        for handle in policy.get_inherited_resources() {
+            // On Windows, CreateProcess() with bInheritHandles = TRUE doesn't automatically set the given handles as inheritable,
+            // instead giving a ERROR_INVALID_PARAMETER if one of them is not. On any OS, this is a best-effort to ensure
+            // resources do end up in the child process, with the by-design race condition that another thread might undo this
+            // before we create the child.
+            set_handle_inheritance(handle, true)?;
         }
         for env_var in envp {
             if env_var.to_string_lossy().starts_with(IPC_HANDLE_ENV_NAME) {

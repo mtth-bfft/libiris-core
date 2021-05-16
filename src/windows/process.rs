@@ -95,27 +95,27 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
         ptal.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles_to_inherit.as_ptr() as *const _, handles_to_inherit.len() * std::mem::size_of::<HANDLE>())?;
 
         // Always prevent child process creation, as it would break many security features we implement here
-        let policy = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
-        //ptal.set(PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, &policy as *const _ as *const _, std::mem::size_of_val(&policy))?;
+        let child_proc_policy = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
+        //ptal.set(PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, &child_proc_policy as *const _ as *const _, std::mem::size_of_val(&child_proc_policy))?;
 
         // Always apply sane defaults for process mitigation policies
-        let mut policy: DWORD = 0;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_DEP_ENABLE;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_SEHOP_ENABLE;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_FORCE_RELOCATE_IMAGES_ALWAYS_ON;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_FORCE_RELOCATE_IMAGES_ALWAYS_ON_REQ_RELOCS;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_HEAP_TERMINATE_ALWAYS_ON;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_BOTTOM_UP_ASLR_ALWAYS_ON;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_HIGH_ENTROPY_ASLR_ALWAYS_ON;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_STRICT_HANDLE_CHECKS_ALWAYS_ON;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_EXTENSION_POINT_DISABLE_ALWAYS_ON; // loading extension DLLs will crash us if they are not win32k-filtering-aware or make syscalls with bad handles
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_REMOTE_ALWAYS_ON;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_FONT_DISABLE_ALWAYS_ON;
-        //policy |= PROCESS_CREATION_MITIGATION_POLICY_PROHIBIT_DYNAMIC_CODE_ALWAYS_ON;
-        //ptal.set(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &policy as *const _ as *const _, std::mem::size_of_val(&policy))?;
+        let mut mitigation_policy: DWORD = 0;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_DEP_ENABLE;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_SEHOP_ENABLE;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_FORCE_RELOCATE_IMAGES_ALWAYS_ON;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_FORCE_RELOCATE_IMAGES_ALWAYS_ON_REQ_RELOCS;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_HEAP_TERMINATE_ALWAYS_ON;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_BOTTOM_UP_ASLR_ALWAYS_ON;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_HIGH_ENTROPY_ASLR_ALWAYS_ON;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_STRICT_HANDLE_CHECKS_ALWAYS_ON;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_EXTENSION_POINT_DISABLE_ALWAYS_ON; // loading extension DLLs will crash us if they are not win32k-filtering-aware or make syscalls with bad handles
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_REMOTE_ALWAYS_ON;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_FONT_DISABLE_ALWAYS_ON;
+        //mitigation_policy |= PROCESS_CREATION_MITIGATION_POLICY_PROHIBIT_DYNAMIC_CODE_ALWAYS_ON;
+        //ptal.set(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &mitigation_policy as *const _ as *const _, std::mem::size_of_val(&mitigation_policy))?;
         
         // Start as an AppContainer whenever possible
         let mut capabilities: SECURITY_CAPABILITIES = unsafe { std::mem::zeroed() };
@@ -138,8 +138,8 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
         //ptal.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities as *const _ as *const _, std::mem::size_of_val(&capabilities))?;
 
         // Start as a Less Privileged AppContainer whenever possible
-        let policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
-        //ptal.set(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &policy as *const _ as *const _, std::mem::size_of_val(&policy))?;
+        let lpac_policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
+        //ptal.set(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &lpac_policy as *const _ as *const _, std::mem::size_of_val(&lpac_policy))?;
 
         // Start a child process (enable handle inheritance, but only because we set the allowed list explicitly earlier)
         let mut proc_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
