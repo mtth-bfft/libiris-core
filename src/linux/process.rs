@@ -1,10 +1,12 @@
 use core::ffi::c_void;
+use core::ptr::null;
 use libc::c_int;
 use std::ffi::{CStr, CString};
 use std::io::Error;
 use std::convert::TryInto;
 use crate::Policy;
 use crate::process::CrossPlatformSandboxedProcess;
+use crate::set_handle_inheritance;
 
 const DEFAULT_CLONE_STACK_SIZE: usize = 1 * 1024 * 1024;
 
@@ -45,6 +47,7 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
             return Err(format!("pipe() failed with code {}", Error::last_os_error()));
         }
         let (parent_pipe, child_pipe) = (clone_error_pipes[0], clone_error_pipes[1]);
+        set_handle_inheritance(child_pipe.try_into().unwrap(), false)?; // set the pipe as CLOEXEC so it gets closed on successful execve()
 
         // Pack together everything that needs to be passed to the new process
         let entrypoint_params = EntrypointParameters {
@@ -102,13 +105,39 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
 
 extern "C" fn process_entrypoint(args: *mut c_void) -> c_int
 {
-    let mut args = unsafe { Box::from_raw(args as *mut EntrypointParameters) };
+    let args = unsafe { Box::from_raw(args as *mut EntrypointParameters) };
     println!(" [.] Worker {} started with PID={}", args.exe.to_string_lossy(), unsafe { libc::getpid() });
 
-    // Lockdown comes here
-
-    let argv: Vec<*const i8> = args.argv.iter().map(|x| x.as_ptr()).collect();
-    let envp: Vec<*const i8> = args.envp.iter().map(|x| x.as_ptr()).collect();
+    // Cleanup leftover file descriptors from our parent or from code injected into our process
+    for entry in std::fs::read_dir("/proc/self/fd/").expect("unable to read /proc/self/fd/") {
+        let entry = entry.expect("unable to read entry from /proc/self/fd/");
+        if !entry.file_type().expect("unable to read file type from /proc/self/fd").is_symlink() {
+            continue;
+        }
+        // Exclude the file descriptor from the read_dir itself (if we close it, we might
+        // break the /proc/self/fd/ enumeration)
+        let mut path = entry.path();
+        loop {
+            match std::fs::read_link(&path) {
+                Ok(target) => path = target,
+                Err(_) => break,
+            }
+        }
+        if path.to_string_lossy() == format!("/proc/{}/fd", std::process::id()) {
+            continue;
+        }
+        let fd = entry.file_name().to_string_lossy().parse::<i32>().expect("unable to parse file descriptor number from /proc/self/fd/");
+        if fd == args.execve_errno_pipe {
+            continue; // don't close the CLOEXEC pipe used to check if execve() worked, otherwise it loses its purpose
+        }
+        if !args.allowed_file_descriptors.contains(&fd) {
+            println!(" [.] Cleaning up file descriptor {}", fd);
+            unsafe { libc::close(fd); }
+        }
+    }
+    
+    let argv: Vec<*const i8> = args.argv.iter().map(|x| x.as_ptr()).chain(std::iter::once(null())).collect();
+    let envp: Vec<*const i8> = args.envp.iter().map(|x| x.as_ptr()).chain(std::iter::once(null())).collect();
     unsafe { libc::execve(args.exe.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
 
     let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);

@@ -14,19 +14,21 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn new(policy: &Policy, exe: &CStr, argv: &[&CStr], envp: &[&CStr]) -> Result<Self, String>
+    pub fn new(policy: &Policy, exe: &CStr, argv: &[&CStr], envp: &[&CStr], auto_set_resources_inheritable: bool) -> Result<Self, String>
     {
         let (mut broker_pipe, worker_pipe) = MessagePipe::new()?;
         let mut policy = policy.clone();
         for handle in worker_pipe.as_handles() {
             policy.allow_inherit_resource(handle)?;
         }
-        for handle in policy.get_inherited_resources() {
-            // On Windows, CreateProcess() with bInheritHandles = TRUE doesn't automatically set the given handles as inheritable,
-            // instead giving a ERROR_INVALID_PARAMETER if one of them is not. On any OS, this is a best-effort to ensure
-            // resources do end up in the child process, with the by-design race condition that another thread might undo this
-            // before we create the child.
-            set_handle_inheritance(handle, true)?;
+        if auto_set_resources_inheritable {
+            for handle in policy.get_inherited_resources() {
+                // On Windows, CreateProcess() with bInheritHandles = TRUE doesn't automatically set the given handles as inheritable,
+                // instead giving a ERROR_INVALID_PARAMETER if one of them is not. On any OS, this is a best-effort to ensure
+                // resources do end up in the child process, with the by-design race condition that another thread might undo this
+                // before we create the child.
+                set_handle_inheritance(handle, true)?;
+            }
         }
         for env_var in envp {
             if env_var.to_string_lossy().starts_with(IPC_HANDLE_ENV_NAME) {
@@ -43,8 +45,11 @@ impl Worker {
         })
     }
 
-    pub fn wait_for_exit(&mut self) -> Result<u64, String>
-    {
+    pub fn get_pid(&self) -> u64 {
+        self.process.get_pid()
+    }
+
+    pub fn wait_for_exit(&mut self) -> Result<u64, String> {
         self.process.wait_for_exit()
     }
 }
