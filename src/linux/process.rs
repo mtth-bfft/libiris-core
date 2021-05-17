@@ -94,12 +94,12 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
 
     fn wait_for_exit(&mut self) -> Result<u64, String>
     {
-        Ok(0)
+        Ok(0) // FIXME: implement based on the IPC event loop
     }
 
     fn has_exited(&self) -> bool
     {
-        true
+        true // FIXME: implement based on the IPC event loop
     }
 }
 
