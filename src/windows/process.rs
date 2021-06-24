@@ -4,11 +4,13 @@ use std::ffi::{CStr, CString};
 use std::convert::TryInto;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use winapi::um::processthreadsapi::{CreateProcessA, PROCESS_INFORMATION, GetProcessId, GetExitCodeProcess, TerminateProcess};
-use winapi::um::userenv::CreateAppContainerProfile;
+use winapi::um::userenv::{CreateAppContainerProfile, DeleteAppContainerProfile};
 use winapi::um::synchapi::WaitForSingleObject;
-use winapi::shared::winerror::ERROR_WAIT_NO_CHILDREN;
-use winapi::um::handleapi::CloseHandle;
-use winapi::um::winbase::{EXTENDED_STARTUPINFO_PRESENT, STARTUPINFOEXA, INFINITE, STARTF_FORCEOFFFEEDBACK, DETACHED_PROCESS};
+use winapi::um::minwinbase::STILL_ACTIVE;
+use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+use winapi::um::winbase::{EXTENDED_STARTUPINFO_PRESENT, STARTUPINFOEXA, INFINITE, WAIT_OBJECT_0, STARTF_FORCEOFFFEEDBACK, CREATE_NEW_CONSOLE, DETACHED_PROCESS, STARTF_USESTDHANDLES};
+use winapi::shared::winerror::HRESULT_FROM_WIN32;
+use winapi::shared::winerror::ERROR_ALREADY_EXISTS;
 use winapi::um::winnt::{HANDLE, SECURITY_CAPABILITIES};
 use winapi::shared::minwindef::{DWORD, MAX_PATH};
 use winapi::shared::basetsd::DWORD_PTR;
@@ -18,6 +20,7 @@ use crate::Policy;
 use crate::os::sid::Sid;
 use crate::os::proc_thread_attribute_list::ProcThreadAttributeList;
 use crate::process::CrossPlatformSandboxedProcess;
+use crate::is_handle_inheritable;
 
 // Waiting for these constants from WinSDK to be included in winapi
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: DWORD_PTR = 0x20002;
@@ -75,19 +78,36 @@ static mut PER_PROCESS_APPCONTAINER_ID: std::sync::atomic::AtomicUsize = AtomicU
 
 pub(crate) struct OSSandboxedProcess {
     pid: u64,
-    h_process: Option<HANDLE>,
-    exit_code: Option<DWORD>,
+    h_process: HANDLE,
+    appcontainer_name: Option<String>,
+}
+
+impl Drop for OSSandboxedProcess {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.h_process); }
+        if let Some(appcontainer_name) = &self.appcontainer_name {
+            let name_buf: Vec<u16> = appcontainer_name.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe { DeleteAppContainerProfile(name_buf.as_ptr() as *const _) };
+        }
+    }
 }
 
 impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
 
-    fn new(policy: &Policy, exe: &CStr, argv: &[&CStr], envp: &[&CStr]) -> Result<Self, String>
+    fn new(policy: &Policy, exe: &CStr, argv: &[&CStr], envp: &[&CStr], stdin: Option<u64>, stdout: Option<u64>, stderr: Option<u64>) -> Result<Self, String>
     {
         if argv.len() < 1 {
             return Err("Invalid argument: empty argv".to_owned());
         }
+        for fd in vec![stdin, stdout, stderr] {
+            if let Some(fd) = fd {
+                if !is_handle_inheritable(fd)? {
+                    return Err("Stdin, stdout, and stderr handles must be set as inheritable for them to be usable by a worker".to_owned());
+                }
+            }
+        }
 
-        // Build the full commandline with quotes to protect prevent C:\Program Files\a.exe to launch C:\Program.exe
+        // Build the full commandline with quotes to protect prevent C:\Program Files\a.exe from launching C:\Program.exe
         let mut cmdline = vec![b'"'];
         cmdline.extend_from_slice(exe.to_bytes());
         cmdline.push(b'"');
@@ -141,11 +161,18 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
         let mut ptal = ProcThreadAttributeList::new(MAX_USED_PROC_THREAD_ATTRIBUTES)?;
         let mut start_info: STARTUPINFOEXA = unsafe { std::mem::zeroed() };
         start_info.StartupInfo.cb = std::mem::size_of_val(&start_info).try_into().unwrap();
-        start_info.StartupInfo.dwFlags = STARTF_FORCEOFFFEEDBACK; // disable the "wait" cursor when starting this process
+        start_info.StartupInfo.dwFlags = STARTF_FORCEOFFFEEDBACK | STARTF_USESTDHANDLES;
+        start_info.StartupInfo.hStdInput = stdin.and_then(|x| Some(x as HANDLE)).unwrap_or(INVALID_HANDLE_VALUE);
+        start_info.StartupInfo.hStdOutput = stdout.and_then(|x| Some(x as HANDLE)).unwrap_or(INVALID_HANDLE_VALUE);
+        start_info.StartupInfo.hStdError = stderr.and_then(|x| Some(x as HANDLE)).unwrap_or(INVALID_HANDLE_VALUE);
         start_info.lpAttributeList = ptal.as_ptr() as *const _ as *mut _;
 
         // Restrict inherited handles to only those explicitly allowed
-        let handles_to_inherit = policy.get_inherited_resources().into_iter().map(|n| n as *mut c_void).collect::<Vec<HANDLE>>();
+        let mut handles_to_inherit = policy.get_inherited_resources().into_iter().map(|n| n as *mut c_void).collect::<Vec<HANDLE>>();
+        // (CreateProcess fails with ERROR_INVALID_PARAMETER if a handle is set to be inherited twice,
+        // so we sort to deduplicate)
+        handles_to_inherit.sort();
+        handles_to_inherit.dedup();
         println!(" [.] Setting handles to inherit: {:?}", &handles_to_inherit);
         ptal.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles_to_inherit.as_ptr() as *const _, handles_to_inherit.len() * std::mem::size_of::<HANDLE>())?;
 
@@ -174,24 +201,17 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
         
         // Start as an AppContainer whenever possible
         let mut capabilities: SECURITY_CAPABILITIES = unsafe { std::mem::zeroed() };
-        /*for i in 0.. {
-            let appcontainer_name = format!("IrisAppContainer_{}_{}", std::process::id(), i);
-            let name_buf: Vec<u16> = appcontainer_name.encode_utf16().chain(std::iter::once(0)).collect();
-            let res = unsafe { CreateAppContainerProfile(name_buf.as_ptr() as *const _, name_buf.as_ptr() as *const _, name_buf.as_ptr() as *const _, null_mut(), 0, &mut capabilities.AppContainerSid as *mut _) };
-            if res == 0 {
-                break;
-            }
-            let err = unsafe { GetLastError() };
-            if err == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) as u32 {
-                return Err(format!("CreateAppContainerProfile({}) failed with error {}", appcontainer_name, err));
-            }
-        }*/
         let appcontainer_id = unsafe { PER_PROCESS_APPCONTAINER_ID.fetch_add(1, Ordering::Relaxed) };
         let appcontainer_name = format!("IrisAppContainer_{}_{}", std::process::id(), appcontainer_id);
         let name_buf: Vec<u16> = appcontainer_name.encode_utf16().chain(std::iter::once(0)).collect();
-        let res = unsafe { CreateAppContainerProfile(name_buf.as_ptr() as *const _, name_buf.as_ptr() as *const _, name_buf.as_ptr() as *const _, null_mut(), 0, &mut capabilities.AppContainerSid as *mut _) };
+        let mut res = unsafe { CreateAppContainerProfile(name_buf.as_ptr() as *const _, name_buf.as_ptr() as *const _, name_buf.as_ptr() as *const _, null_mut(), 0, &mut capabilities.AppContainerSid as *mut _) };
+        if res == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) {
+            // There is a leftover appcontainer profile from a previous process with our PID which did not clean up on exit. Retry
+            unsafe { DeleteAppContainerProfile(name_buf.as_ptr() as *const _) };
+            res = unsafe { CreateAppContainerProfile(name_buf.as_ptr() as *const _, name_buf.as_ptr() as *const _, name_buf.as_ptr() as *const _, null_mut(), 0, &mut capabilities.AppContainerSid as *mut _) };
+        }
         if res != 0 {
-            return Err(format!("CreateAppContainerProfile({}) failed with error {}", appcontainer_name, unsafe { GetLastError() }));
+            return Err(format!("CreateAppContainerProfile({}) failed with error {}", appcontainer_name, res));
         }
         let appcontainer_sid = Sid::from_appcontainer_name(&appcontainer_name)?;
         capabilities.AppContainerSid = appcontainer_sid.as_ptr();
@@ -203,6 +223,7 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
 
         // Start a child process (enable handle inheritance, but only because we set the allowed list explicitly earlier)
         let mut proc_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // TODO: use CREATE_BREAKAWAY_FROM_JOB if necessary on older OSes where nesting isn't supported
         let res = unsafe { CreateProcessA(null_mut(), cmdline.as_ptr() as *mut _, null_mut(), null_mut(), 1, EXTENDED_STARTUPINFO_PRESENT | DETACHED_PROCESS, envblock.as_ptr() as *mut _, cwd.as_ptr() as *mut _, &mut start_info as *mut _ as *mut _, &mut proc_info as *mut _) };
         if res == 0 {
             return Err(format!("CreateProcess({}) failed with error {}", cmdline.to_string_lossy(), unsafe { GetLastError() }));
@@ -214,8 +235,8 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
         }
         Ok(Self {
             pid: pid.into(),
-            h_process: Some(proc_info.hProcess),
-            exit_code: None,
+            h_process: proc_info.hProcess,
+            appcontainer_name: Some(appcontainer_name),
         })
     }
 
@@ -224,29 +245,19 @@ impl CrossPlatformSandboxedProcess for OSSandboxedProcess {
     }
 
     fn wait_for_exit(&mut self) -> Result<u64, String> {
-        if let Some(h_process) = self.h_process.take() {
-            // Our child is still there, try to wait for it (indefinitely) to exit
-            self.exit_code = Some(ERROR_WAIT_NO_CHILDREN);
-            let res = unsafe { WaitForSingleObject(h_process, INFINITE) };
-            if res != 0 {
-                // Waiting failed, terminate as a best effort to avoid leaking the handle, ignoring any error
-                unsafe { TerminateProcess(h_process, self.exit_code.unwrap()); }
-                return Err(format!("WaitForSingleObject() failed with error {}", unsafe { GetLastError() }));
-            }
-            // Child has just exited and woken us up, try to get its exit code
-            let mut exit_code = 0xFEFEFEFF;
-            let res = unsafe { GetExitCodeProcess(h_process, &mut exit_code as *mut _) };
-            unsafe { CloseHandle(h_process); }
+        let mut exit_code: DWORD = STILL_ACTIVE;
+        loop {
+            let res = unsafe { GetExitCodeProcess(self.h_process, &mut exit_code as *mut _) };
             if res == 0 {
                 return Err(format!("GetExitCodeProcess() failed with error {}", unsafe { GetLastError() }));
             }
-            self.exit_code = Some(exit_code);
+            if exit_code != STILL_ACTIVE {
+                return Ok(exit_code.into());
+            }
+            let res = unsafe { WaitForSingleObject(self.h_process, INFINITE) };
+            if res != WAIT_OBJECT_0 {
+                return Err(format!("WaitForSingleObject() failed with error {}", unsafe { GetLastError() }));
+            }
         }
-        // Child has already exited, just return its exit code
-        Ok(self.exit_code.unwrap().into())
-    }
-
-    fn has_exited(&self) -> bool {
-        self.h_process.is_none()
     }
 }

@@ -1,9 +1,9 @@
 use std::convert::TryInto;
 use std::io::Error;
-use libc::{fcntl, F_GETFD, F_SETFD, FD_CLOEXEC};
+use libc::{c_int, fcntl, F_GETFD, F_SETFD, FD_CLOEXEC};
 
-pub fn set_handle_inheritance(handle: u64, allow_inherit: bool) -> Result<(), String> {
-    let fd = match handle.try_into() {
+pub fn set_handle_inheritable(handle: u64, allow_inherit: bool) -> Result<(), String> {
+    let fd: c_int = match handle.try_into() {
         Ok(n) => n,
         Err(_) => return Err(format!("Invalid file descriptor {}, cannot set as inheritable", handle)),
     };
@@ -18,15 +18,15 @@ pub fn set_handle_inheritance(handle: u64, allow_inherit: bool) -> Result<(), St
     Ok(())
 }
 
-pub fn get_handle_inheritance(handle: u64) -> Result<bool, String> {
-    let fd = match handle.try_into() {
+pub fn is_handle_inheritable(handle: u64) -> Result<bool, String> {
+    let fd: c_int = match handle.try_into() {
         Ok(n) => n,
-        Err(_) => return Err(format!("Invalid file descriptor {}, cannot set as inheritable", handle)),
+        Err(_) => return Err(format!("Invalid file descriptor {}, cannot check inheritability", handle)),
     };
     let current_flags = unsafe { fcntl(fd, F_GETFD) };
     if current_flags < 0 {
         return Err(format!("fcntl(F_GETFD) failed with error {}", Error::last_os_error().raw_os_error().unwrap_or(0)));
     }
-    Ok((current_flags & FD_CLOEXEC) != 0)
+    Ok((current_flags & FD_CLOEXEC) == 0)
 }
 
